@@ -260,6 +260,76 @@ defmodule HelloBeam.ReasoningNode do
     end
   end
 
+  # -- Boundaries: constraints that teach rather than just block --
+
+  @boundaries [
+    %{
+      id: :sandbox,
+      constraint: "All file operations (read, write, list) are confined to priv/workspace/.",
+      why: "Prevents accidental modification of the project source or system files.",
+      alternative: "To promote code into the main codebase, use the propose_module tool."
+    },
+    %{
+      id: :protected_modules,
+      constraint: "Core modules (reasoning_node, application, proposals, beam_shell, memory_manager) cannot be overwritten via proposals.",
+      why: "Protects the node's own infrastructure from self-modification that could break the system.",
+      alternative: "Propose new modules with unique names instead. The supervisor can manually update core modules."
+    },
+    %{
+      id: :test_file_naming,
+      constraint: "Test files must end in _test.exs to be executed by run_tests.",
+      why: "ExUnit convention — ensures only intentional test files are executed.",
+      alternative: "Name your test files with the _test.exs suffix (e.g., 'test/my_hypothesis_test.exs')."
+    },
+    %{
+      id: :proposal_naming,
+      constraint: "Proposal names must be snake_case (lowercase letters, digits, underscores).",
+      why: "Ensures consistent, filesystem-safe naming for proposal directories.",
+      alternative: "Use names like 'log_viewer' or 'health_check' instead of camelCase or special characters."
+    }
+  ]
+
+  defp boundary_error(boundary_id, context, state) do
+    boundary = Enum.find(@boundaries, &(&1.id == boundary_id))
+
+    message = """
+    Boundary: #{boundary.constraint}
+    Why: #{boundary.why}
+    Alternative: #{boundary.alternative}
+    Context: #{context}\
+    """
+
+    # Auto-teach the boundary on first encounter
+    state = teach_boundary_once(state, boundary_id, boundary)
+
+    {message, state}
+  end
+
+  defp teach_boundary_once(state, boundary_id, boundary) do
+    tag = "boundary:#{boundary_id}"
+
+    already_known =
+      Enum.any?(state.memories, fn m ->
+        m.type == :confirmed and String.contains?(m.content, tag)
+      end)
+
+    if already_known do
+      state
+    else
+      memory = %{
+        content: "[#{tag}] #{boundary.constraint} Alternative: #{boundary.alternative}",
+        type: :confirmed,
+        source: :boundary_teaching,
+        at: DateTime.utc_now()
+      }
+
+      state = %{state | memories: [memory | state.memories]}
+      persist_memories(state)
+      Logger.info("ReasoningNode learned boundary: #{boundary_id}")
+      state
+    end
+  end
+
   # -- Agentic loop: reason → tool call → feed result → repeat --
 
   defp agentic_loop(system, messages, state, iterations_left, tool_log \\ [])
@@ -371,21 +441,26 @@ defmodule HelloBeam.ReasoningNode do
   end
 
   defp dispatch_tool("write_file", %{"path" => path, "content" => content}, state) do
-    {result, state} = execute_tool({:write_file, path, content}, state)
-    {inspect(result), state}
+    case execute_tool({:write_file, path, content}, state) do
+      {{:ok, :written}, state} -> {"File written successfully: #{path}", state}
+      {{:error, :sandbox_escape}, state} -> boundary_error(:sandbox, "write_file path: #{path}", state)
+      {{:error, reason}, state} -> {"Error writing file: #{inspect(reason)}", state}
+    end
   end
 
   defp dispatch_tool("read_file", %{"path" => path}, state) do
     case execute_tool({:read_file, path}, state) do
       {{:ok, content}, state} -> {content, state}
-      {{:error, reason}, state} -> {"Error: #{inspect(reason)}", state}
+      {{:error, :sandbox_escape}, state} -> boundary_error(:sandbox, "read_file path: #{path}", state)
+      {{:error, reason}, state} -> {"Error reading file: #{inspect(reason)}", state}
     end
   end
 
   defp dispatch_tool("list_dir", %{"path" => path}, state) do
     case execute_tool({:list_dir, path}, state) do
       {{:ok, entries}, state} -> {Enum.join(entries, "\n"), state}
-      {{:error, reason}, state} -> {"Error: #{inspect(reason)}", state}
+      {{:error, :sandbox_escape}, state} -> boundary_error(:sandbox, "list_dir path: #{path}", state)
+      {{:error, reason}, state} -> {"Error listing directory: #{inspect(reason)}", state}
     end
   end
 
@@ -415,10 +490,11 @@ defmodule HelloBeam.ReasoningNode do
       {:ok, safe_path} ->
         cond do
           not String.ends_with?(safe_path, "_test.exs") ->
-            {"Error: Test file must end in _test.exs", state}
+            boundary_error(:test_file_naming, "run_tests file: #{test_file}", state)
 
           not File.exists?(safe_path) ->
-            {"Error: Test file does not exist: #{test_file}", state}
+            {"Error: Test file does not exist at '#{test_file}'. " <>
+             "Use list_dir to see available files, or write_file to create the test first.", state}
 
           true ->
             {ref_string, state} = run_test_async(safe_path, state)
@@ -427,7 +503,7 @@ defmodule HelloBeam.ReasoningNode do
         end
 
       {:error, :sandbox_escape} ->
-        {"Error: Path escapes sandbox: #{test_file}", state}
+        boundary_error(:sandbox, "run_tests path: #{test_file}", state)
     end
   end
 
@@ -453,16 +529,31 @@ defmodule HelloBeam.ReasoningNode do
     end
   end
 
+  defp dispatch_tool("list_boundaries", _input, state) do
+    text =
+      @boundaries
+      |> Enum.map(fn b ->
+        """
+        [#{b.id}]
+          Constraint:  #{b.constraint}
+          Why:         #{b.why}
+          Alternative: #{b.alternative}
+        """
+      end)
+      |> Enum.join("\n")
+
+    {"Active Boundaries:\n\n#{text}", state}
+  end
+
   defp dispatch_tool("propose_module", params, state) do
     %{"name" => name, "module_code" => code, "intent" => intent, "target_path" => target_path} = params
 
     cond do
       not Regex.match?(~r/^[a-z][a-z0-9_]*$/, name) ->
-        {"Error: Name must be snake_case (letters, digits, underscores). Got: #{name}", state}
+        boundary_error(:proposal_naming, "propose_module name: #{name}", state)
 
       Path.basename(target_path) in @protected_modules ->
-        {"Error: Cannot overwrite protected module '#{Path.basename(target_path)}'. " <>
-         "Core infrastructure is not modifiable through proposals.", state}
+        boundary_error(:protected_modules, "propose_module target: #{target_path}", state)
 
       true ->
         proposal_dir = Path.join(@proposals_dir, name)
@@ -578,6 +669,14 @@ defmodule HelloBeam.ReasoningNode do
             }
           },
           required: ["run_id"]
+        }
+      },
+      %{
+        name: "list_boundaries",
+        description: "List all active constraints and boundaries that govern your actions. Each boundary explains what is restricted, why, and what the legitimate alternative is. Use this to understand your operating environment before acting.",
+        input_schema: %{
+          type: "object",
+          properties: %{}
         }
       },
       %{
