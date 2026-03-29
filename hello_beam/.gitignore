@@ -1,0 +1,40 @@
+# The directory Mix will write compiled artifacts to.
+/_build/
+
+# If you run "mix test --cover", coverage assets end up here.
+/cover/
+
+# The directory Mix downloads your dependencies sources to.
+/deps/
+
+# Where third-party dependencies like ExDoc output generated docs.
+/doc/
+
+# Temporary files, for example, from tests.
+/tmp/
+
+# If the VM crashes, it generates a dump, let's ignore it too.
+erl_crash.dump
+
+# Also ignore archive artifacts (built via "mix archive.build").
+*.ez
+
+# Ignore package tarball (built via "mix hex.build").
+hello_beam-*.tar
+
+# Each node's memories are unique to its instance
+/priv/memories/*.bin
+
+# API keys
+.env
+.envrc
+
+# Intellij
+**/.idea
+
+# Node workspace — runtime artifacts, not source
+/priv/workspace/
+
+# Memory backups
+/priv/memories/backups/
+/priv/memories/archive/
