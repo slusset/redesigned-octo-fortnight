@@ -12,7 +12,12 @@ defmodule HelloBeam.ReasoningNode do
   require Logger
 
   @workspace_dir Path.join(File.cwd!(), "priv/workspace")
+  @proposals_dir Path.join(File.cwd!(), "priv/workspace/proposals")
   @default_max_iterations 25
+  @protected_modules ~w(
+    reasoning_node.ex application.ex proposals.ex beam_shell.ex
+    memory_manager.ex
+  )
 
   defp max_iterations, do: Application.get_env(:hello_beam, :max_iterations, @default_max_iterations)
 
@@ -72,6 +77,7 @@ defmodule HelloBeam.ReasoningNode do
     # Ensure the workspace sandbox exists
     File.mkdir_p!(Path.join(@workspace_dir, "test"))
     File.mkdir_p!(Path.join(@workspace_dir, "lib"))
+    File.mkdir_p!(Path.join(@workspace_dir, "proposals"))
 
     state = %{
       role: role,
@@ -392,6 +398,43 @@ defmodule HelloBeam.ReasoningNode do
     end
   end
 
+  defp dispatch_tool("propose_module", params, state) do
+    %{"name" => name, "module_code" => code, "intent" => intent, "target_path" => target_path} = params
+
+    cond do
+      not Regex.match?(~r/^[a-z][a-z0-9_]*$/, name) ->
+        {"Error: Name must be snake_case (letters, digits, underscores). Got: #{name}", state}
+
+      Path.basename(target_path) in @protected_modules ->
+        {"Error: Cannot overwrite protected module '#{Path.basename(target_path)}'. " <>
+         "Core infrastructure is not modifiable through proposals.", state}
+
+      true ->
+        proposal_dir = Path.join(@proposals_dir, name)
+        File.mkdir_p!(proposal_dir)
+
+        File.write!(Path.join(proposal_dir, "module.ex"), code)
+        File.write!(Path.join(proposal_dir, "intent.md"), """
+        # Proposal: #{name}
+
+        ## Target Path
+        lib/#{target_path}
+
+        ## Intent
+        #{intent}
+
+        ## Proposed At
+        #{DateTime.utc_now()}
+        """)
+
+        Logger.info("ReasoningNode proposed module '#{name}' targeting lib/#{target_path}")
+
+        {"Proposal '#{name}' saved for supervisor review. " <>
+         "The supervisor can review it with: HelloBeam.Proposals.review(\"#{name}\") " <>
+         "and accept with: HelloBeam.Proposals.accept(\"#{name}\")", state}
+    end
+  end
+
   defp dispatch_tool(name, _input, state) do
     {"Unknown tool: #{name}", state}
   end
@@ -480,6 +523,39 @@ defmodule HelloBeam.ReasoningNode do
             }
           },
           required: ["run_id"]
+        }
+      },
+      %{
+        name: "propose_module",
+        description: """
+        Propose a new Elixir module for graduation into the main codebase. \
+        The module source and your intent declaration are saved for the human \
+        supervisor to review. They will accept or reject the proposal — you \
+        cannot install modules directly. Core modules (reasoning_node, application, \
+        proposals, beam_shell, memory_manager) are protected and cannot be overwritten. \
+        Follow your dharma: declare your intent clearly.\
+        """,
+        input_schema: %{
+          type: "object",
+          properties: %{
+            name: %{
+              type: "string",
+              description: "Snake_case name for the module (e.g., 'log_viewer', 'health_check')"
+            },
+            module_code: %{
+              type: "string",
+              description: "The complete Elixir source code for the module"
+            },
+            intent: %{
+              type: "string",
+              description: "Why this module should exist — what need it addresses, what problem it solves. Be specific."
+            },
+            target_path: %{
+              type: "string",
+              description: "Suggested path under lib/ (e.g., 'hello_beam/log_viewer.ex')"
+            }
+          },
+          required: ["name", "module_code", "intent", "target_path"]
         }
       }
     ]

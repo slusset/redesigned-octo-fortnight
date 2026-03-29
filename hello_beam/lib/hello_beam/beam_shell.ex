@@ -48,10 +48,10 @@ defmodule HelloBeam.BeamShell do
   Each input runs through the full reasoning loop.
   """
   def chat do
-    IO.puts("\n╔══════════════════════════════════════════════╗")
-    IO.puts("║  BeamShell — direct line to the reasoning node  ║")
-    IO.puts("║  Type 'exit' to quit, 'status' for process info ║")
-    IO.puts("╚══════════════════════════════════════════════╝\n")
+    IO.puts("\n╔═══════════════════════════════════════════════════╗")
+    IO.puts("║  BeamShell — direct line to the reasoning node      ║")
+    IO.puts("║  Commands: status, memories, proposals, history, exit║")
+    IO.puts("╚═══════════════════════════════════════════════════╝\n")
 
     chat_loop()
   end
@@ -77,6 +77,14 @@ defmodule HelloBeam.BeamShell do
 
           "memories" ->
             show_memories()
+            chat_loop()
+
+          "proposals" ->
+            HelloBeam.Proposals.list()
+            chat_loop()
+
+          "history" ->
+            HelloBeam.Proposals.history()
             chat_loop()
 
           prompt ->
@@ -154,6 +162,13 @@ defmodule HelloBeam.BeamShell do
     HelloBeam.ReasoningNode.teach(content)
     IO.puts("Taught: #{content}")
     :ok
+  end
+
+  @doc """
+  List pending module proposals from the node.
+  """
+  def proposals do
+    HelloBeam.Proposals.list()
   end
 
   defp format_bytes(bytes) when bytes < 1024, do: "#{bytes} B"
