@@ -48,10 +48,11 @@ defmodule HelloBeam.BeamShell do
   Each input runs through the full reasoning loop.
   """
   def chat do
-    IO.puts("\n╔══════════════════════════════════════════════════════════╗")
-    IO.puts("║  BeamShell — direct line to the reasoning node             ║")
-    IO.puts("║  Commands: status, memories, proposals, history, log, exit ║")
-    IO.puts("╚══════════════════════════════════════════════════════════╝\n")
+    IO.puts("\n╔═══════════════════════════════════════════════════════════════════╗")
+    IO.puts("║  BeamShell — direct line to the reasoning node                      ║")
+    IO.puts("║  Commands: status, memories, proposals, history, log, tala, exit    ║")
+    IO.puts("║  Tala:     tala start, tala pause, tala                             ║")
+    IO.puts("╚═══════════════════════════════════════════════════════════════════╝\n")
 
     chat_loop()
   end
@@ -91,6 +92,20 @@ defmodule HelloBeam.BeamShell do
             HelloBeam.ReasoningLog.recent(5) |> HelloBeam.ReasoningLog.print()
             chat_loop()
 
+          "tala" ->
+            show_tala_status()
+            chat_loop()
+
+          "tala start" ->
+            HelloBeam.ReasoningNode.start_tala()
+            IO.puts("  Tala started.\n")
+            chat_loop()
+
+          "tala pause" ->
+            HelloBeam.ReasoningNode.pause_tala()
+            IO.puts("  Tala paused.\n")
+            chat_loop()
+
           prompt ->
             ask(prompt)
             chat_loop()
@@ -126,6 +141,7 @@ defmodule HelloBeam.BeamShell do
         Memories:       #{length(state.memories)}
         Reasoning Runs: #{state.reasoning_count}
         Active Tests:   #{map_size(state.test_runs)}
+        Tala:           #{if state.tala.active, do: "active (cycle #{state.tala.cycle_count + 1})", else: "paused"}
         """
     end
   end
@@ -173,6 +189,49 @@ defmodule HelloBeam.BeamShell do
   """
   def proposals do
     HelloBeam.Proposals.list()
+  end
+
+  @doc """
+  Show the tala (heartbeat) status.
+  """
+  def tala do
+    show_tala_status()
+  end
+
+  @doc """
+  Start the node's autonomous tala heartbeat.
+  """
+  def start_tala do
+    HelloBeam.ReasoningNode.start_tala()
+    IO.puts("  Tala started.\n")
+  end
+
+  @doc """
+  Pause the tala.
+  """
+  def pause_tala do
+    HelloBeam.ReasoningNode.pause_tala()
+    IO.puts("  Tala paused.\n")
+  end
+
+  defp show_tala_status do
+    status = HelloBeam.ReasoningNode.tala_status()
+    phase_names = %{sam: "sam (reflect)", tali_act: "tali (act)", tali_verify: "tali (verify)", khali: "khali (rest)"}
+    phase_display = Map.get(phase_names, status.phase, inspect(status.phase))
+
+    beat_sec = status.beat_interval_ms / 1000
+    cycle_sec = beat_sec * 4
+
+    IO.puts("""
+
+    ── Tala Status ──
+    Active:     #{status.active}
+    Phase:      #{phase_display} (beat #{status.phase_index + 1}/4)
+    Cycle:      #{status.cycle_count}
+    Tempo:      #{beat_sec}s per beat (#{cycle_sec}s per cycle)
+    Reasoning:  #{status.reasoning}
+    Last beat:  #{status.last_beat_at || "never"}
+    """)
   end
 
   @doc """

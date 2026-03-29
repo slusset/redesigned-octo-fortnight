@@ -21,6 +21,13 @@ defmodule HelloBeam.ReasoningNode do
 
   defp max_iterations, do: Application.get_env(:hello_beam, :max_iterations, @default_max_iterations)
 
+  # Tala: 4-beat cycle (Teental / Adi Tala)
+  # sam (reflect) → tali (act) → tali (verify) → khali (rest)
+  @tala_phases [:sam, :tali_act, :tali_verify, :khali]
+  @default_beat_interval_ms 5 * 60 * 1000  # 5 minutes per beat
+
+  defp beat_interval_ms, do: Application.get_env(:hello_beam, :beat_interval_ms, @default_beat_interval_ms)
+
   # -- Public API --
 
   def start_link(opts \\ []) do
@@ -64,6 +71,27 @@ defmodule HelloBeam.ReasoningNode do
     GenServer.call(pid, {:tool, action}, 30_000)
   end
 
+  @doc """
+  Start the tala — the node's autonomous heartbeat.
+  """
+  def start_tala(pid \\ __MODULE__) do
+    GenServer.call(pid, :start_tala)
+  end
+
+  @doc """
+  Pause the tala. The node stops its autonomous cycle but remains responsive.
+  """
+  def pause_tala(pid \\ __MODULE__) do
+    GenServer.call(pid, :pause_tala)
+  end
+
+  @doc """
+  Get the current tala state — phase, cycle count, whether it's active.
+  """
+  def tala_status(pid \\ __MODULE__) do
+    GenServer.call(pid, :tala_status)
+  end
+
   # -- GenServer callbacks --
 
   @impl true
@@ -84,7 +112,15 @@ defmodule HelloBeam.ReasoningNode do
       context: context,
       memories: persisted_memories,
       reasoning_count: 0,
-      test_runs: %{}
+      test_runs: %{},
+      tala: %{
+        active: false,
+        timer_ref: nil,
+        phase_index: 0,
+        cycle_count: 0,
+        reasoning: false,   # true while a tala-initiated reasoning call is in progress
+        last_beat_at: nil
+      }
     }
 
     Logger.info("ReasoningNode started with #{length(persisted_memories)} memories from previous life")
@@ -169,6 +205,38 @@ defmodule HelloBeam.ReasoningNode do
     {:reply, result, state}
   end
 
+  def handle_call(:start_tala, _from, state) do
+    if state.tala.active do
+      {:reply, {:ok, :already_active}, state}
+    else
+      ref = Process.send_after(self(), :tala_beat, beat_interval_ms())
+      tala = %{state.tala | active: true, timer_ref: ref, phase_index: 0}
+      Logger.info("Tala started: #{beat_interval_ms()}ms per beat (#{beat_interval_ms() * 4 / 1000}s per cycle)")
+      {:reply, {:ok, :started}, %{state | tala: tala}}
+    end
+  end
+
+  def handle_call(:pause_tala, _from, state) do
+    if state.tala.timer_ref, do: Process.cancel_timer(state.tala.timer_ref)
+    tala = %{state.tala | active: false, timer_ref: nil}
+    Logger.info("Tala paused")
+    {:reply, :ok, %{state | tala: tala}}
+  end
+
+  def handle_call(:tala_status, _from, state) do
+    phase = Enum.at(@tala_phases, state.tala.phase_index, :unknown)
+    status = %{
+      active: state.tala.active,
+      phase: phase,
+      phase_index: state.tala.phase_index,
+      cycle_count: state.tala.cycle_count,
+      beat_interval_ms: beat_interval_ms(),
+      reasoning: state.tala.reasoning,
+      last_beat_at: state.tala.last_beat_at
+    }
+    {:reply, status, state}
+  end
+
   @impl true
   def handle_cast({:teach, content}, state) do
     memory = %{
@@ -180,6 +248,71 @@ defmodule HelloBeam.ReasoningNode do
 
     state = %{state | memories: [memory | state.memories]}
     persist_memories(state)
+    {:noreply, state}
+  end
+
+  # -- Tala heartbeat --
+
+  @impl true
+  def handle_info(:tala_beat, state) do
+    # Schedule next beat regardless (keeps the rhythm)
+    tala = state.tala
+
+    if not tala.active do
+      {:noreply, state}
+    else
+      ref = Process.send_after(self(), :tala_beat, beat_interval_ms())
+      phase = Enum.at(@tala_phases, tala.phase_index)
+
+      if tala.reasoning do
+        # Already mid-reasoning — skip this beat like a musician extending a phrase
+        Logger.info("Tala: skipping #{phase} beat (reasoning in progress)")
+        {:noreply, %{state | tala: %{tala | timer_ref: ref}}}
+      else
+        Logger.info("Tala: beat #{tala.phase_index + 1}/4 — #{phase} (cycle #{tala.cycle_count + 1})")
+
+        # Advance phase
+        next_index = rem(tala.phase_index + 1, 4)
+        cycle_count = if next_index == 0, do: tala.cycle_count + 1, else: tala.cycle_count
+
+        tala = %{tala |
+          timer_ref: ref,
+          phase_index: next_index,
+          cycle_count: cycle_count,
+          last_beat_at: DateTime.utc_now()
+        }
+
+        state = %{state | tala: tala}
+
+        # Execute the phase (khali = rest = do nothing)
+        case phase do
+          :khali ->
+            Logger.info("Tala: khali — resting")
+            {:noreply, state}
+
+          phase ->
+            # Run phase reasoning in a Task so we don't block the GenServer
+            tala = %{state.tala | reasoning: true}
+            state = %{state | tala: tala}
+            spawn_tala_reasoning(phase)
+            {:noreply, state}
+        end
+      end
+    end
+  end
+
+  def handle_info({:tala_reasoning_complete, phase, result}, state) do
+    tala = %{state.tala | reasoning: false}
+    state = %{state | tala: tala}
+
+    case result do
+      {:ok, _response} ->
+        Logger.info("Tala: #{phase} phase completed")
+
+      {:error, reason} ->
+        Logger.warning("Tala: #{phase} phase failed: #{inspect(reason)}")
+    end
+
     {:noreply, state}
   end
 
@@ -328,6 +461,62 @@ defmodule HelloBeam.ReasoningNode do
       Logger.info("ReasoningNode learned boundary: #{boundary_id}")
       state
     end
+  end
+
+  # -- Tala phase prompts: what the node asks itself on each beat --
+
+  defp spawn_tala_reasoning(phase) do
+    node_pid = self()
+    prompt = tala_prompt(phase)
+
+    Task.Supervisor.start_child(HelloBeam.Workshop, fn ->
+      result = HelloBeam.ReasoningNode.reason(node_pid, prompt)
+      send(node_pid, {:tala_reasoning_complete, phase, result})
+    end)
+  end
+
+  defp tala_prompt(:sam) do
+    """
+    TALA BEAT: sam (reflect)
+
+    This is your autonomous reflection beat. Review your current state:
+    1. Use self_inspect to see your process health and workshop children.
+    2. Consider your recent memories — are there unverified hypotheses that should be tested?
+    3. Are there test results you haven't checked?
+
+    Be brief and focused. If nothing needs attention, simply note that all is well.
+    Do not take action — just observe and reflect.
+    """
+  end
+
+  defp tala_prompt(:tali_act) do
+    """
+    TALA BEAT: tali (act)
+
+    This is your autonomous action beat. Based on your most recent reflection,
+    choose ONE deliberate action:
+    - If you have an unverified hypothesis, write a test for it and run it.
+    - If you have a tested and confirmed capability, propose it as a module.
+    - If your workspace needs organizing, do that.
+    - If nothing needs doing, store a memory about your current state.
+
+    Take exactly one action. Be purposeful. Follow the dharma: declare intent first.
+    """
+  end
+
+  defp tala_prompt(:tali_verify) do
+    """
+    TALA BEAT: tali (verify)
+
+    This is your autonomous verification beat. Check the outcomes of recent actions:
+    - If you ran tests, check the results with check_test_results.
+    - If you proposed a module, check if it was accepted or rejected.
+    - Compare what happened against what you intended.
+
+    If outcomes match intent, store a confirmed memory.
+    If they diverge, store a hypothesis about why and what to try differently.
+    Be honest about what worked and what didn't.
+    """
   end
 
   # -- Message compaction: prevent context from growing without bound --
