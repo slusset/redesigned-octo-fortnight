@@ -48,10 +48,10 @@ defmodule HelloBeam.BeamShell do
   Each input runs through the full reasoning loop.
   """
   def chat do
-    IO.puts("\n╔═══════════════════════════════════════════════════╗")
-    IO.puts("║  BeamShell — direct line to the reasoning node      ║")
-    IO.puts("║  Commands: status, memories, proposals, history, exit║")
-    IO.puts("╚═══════════════════════════════════════════════════╝\n")
+    IO.puts("\n╔══════════════════════════════════════════════════════════╗")
+    IO.puts("║  BeamShell — direct line to the reasoning node             ║")
+    IO.puts("║  Commands: status, memories, proposals, history, log, exit ║")
+    IO.puts("╚══════════════════════════════════════════════════════════╝\n")
 
     chat_loop()
   end
@@ -85,6 +85,10 @@ defmodule HelloBeam.BeamShell do
 
           "history" ->
             HelloBeam.Proposals.history()
+            chat_loop()
+
+          "log" ->
+            HelloBeam.ReasoningLog.recent(5) |> HelloBeam.ReasoningLog.print()
             chat_loop()
 
           prompt ->
@@ -169,6 +173,13 @@ defmodule HelloBeam.BeamShell do
   """
   def proposals do
     HelloBeam.Proposals.list()
+  end
+
+  @doc """
+  Show recent reasoning log entries.
+  """
+  def log(n \\ 5) do
+    HelloBeam.ReasoningLog.recent(n) |> HelloBeam.ReasoningLog.print()
   end
 
   defp format_bytes(bytes) when bytes < 1024, do: "#{bytes} B"

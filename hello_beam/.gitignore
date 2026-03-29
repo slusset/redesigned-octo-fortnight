@@ -38,3 +38,6 @@ hello_beam-*.tar
 # Memory backups
 /priv/memories/backups/
 /priv/memories/archive/
+
+# Reasoning logs — runtime artifacts
+/priv/reasoning_log/

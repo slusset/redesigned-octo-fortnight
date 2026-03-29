@@ -95,17 +95,63 @@ defmodule HelloBeam.ReasoningNode do
   def handle_call({:reason, prompt}, _from, state) do
     %{system: system} = build_messages(state, prompt)
     messages = [%{role: "user", content: prompt}]
+    start_time = System.monotonic_time(:millisecond)
+    memory_count_before = length(state.memories)
 
     case agentic_loop(system, messages, state, max_iterations()) do
-      {:ok, response, state} ->
+      {:ok, response, state, tool_log, iterations_left} ->
+        duration_ms = System.monotonic_time(:millisecond) - start_time
+
         state =
           state
           |> Map.update!(:reasoning_count, &(&1 + 1))
           |> maybe_extract_memory(prompt, response)
 
+        memories_created = length(state.memories) - memory_count_before
+
+        HelloBeam.ReasoningLog.append(%{
+          prompt: prompt,
+          response: String.slice(response, 0, 500),
+          tools_used: tool_log,
+          iterations_used: max_iterations() - iterations_left,
+          max_iterations: max_iterations(),
+          duration_ms: duration_ms,
+          memories_created: memories_created,
+          status: "ok"
+        })
+
         {:reply, {:ok, response}, state}
 
+      {:error, :max_iterations_reached, tool_log} ->
+        duration_ms = System.monotonic_time(:millisecond) - start_time
+
+        HelloBeam.ReasoningLog.append(%{
+          prompt: prompt,
+          response: "(max iterations reached)",
+          tools_used: tool_log,
+          iterations_used: max_iterations(),
+          max_iterations: max_iterations(),
+          duration_ms: duration_ms,
+          memories_created: 0,
+          status: "max_iterations_reached"
+        })
+
+        {:reply, {:error, :max_iterations_reached}, state}
+
       {:error, reason} ->
+        duration_ms = System.monotonic_time(:millisecond) - start_time
+
+        HelloBeam.ReasoningLog.append(%{
+          prompt: prompt,
+          response: inspect(reason),
+          tools_used: [],
+          iterations_used: 0,
+          max_iterations: max_iterations(),
+          duration_ms: duration_ms,
+          memories_created: 0,
+          status: "error"
+        })
+
         {:reply, {:error, reason}, state}
     end
   end
@@ -216,22 +262,31 @@ defmodule HelloBeam.ReasoningNode do
 
   # -- Agentic loop: reason → tool call → feed result → repeat --
 
-  defp agentic_loop(_system, _messages, _state, 0) do
-    {:error, :max_iterations_reached}
+  defp agentic_loop(system, messages, state, iterations_left, tool_log \\ [])
+
+  defp agentic_loop(_system, _messages, _state, 0, tool_log) do
+    {:error, :max_iterations_reached, tool_log}
   end
 
-  defp agentic_loop(system, messages, state, iterations_left) do
+  defp agentic_loop(system, messages, state, iterations_left, tool_log) do
     case call_claude_api(system, messages) do
       {:ok, %{"content" => content, "stop_reason" => stop_reason}} ->
         case stop_reason do
           "end_turn" ->
-            # Done reasoning — extract final text
             text = extract_text(content)
-            {:ok, text, state}
+            {:ok, text, state, tool_log, iterations_left}
 
           "tool_use" ->
             # Claude wants to use tools — execute them and continue
             {tool_results, state} = execute_tool_calls(content, state)
+
+            # Record which tools were called for the reasoning log
+            tool_use_blocks = Enum.filter(content, &(&1["type"] == "tool_use"))
+
+            new_entries =
+              Enum.map(tool_use_blocks, fn block ->
+                %{name: block["name"], input_keys: Map.keys(block["input"] || %{})}
+              end)
 
             # Append assistant message + tool results, then loop
             updated_messages =
@@ -240,12 +295,12 @@ defmodule HelloBeam.ReasoningNode do
                 [%{role: "user", content: tool_results}]
 
             Logger.info("ReasoningNode tool loop: #{length(tool_results)} tool(s) called, #{iterations_left - 1} iterations remaining")
-            agentic_loop(system, updated_messages, state, iterations_left - 1)
+            agentic_loop(system, updated_messages, state, iterations_left - 1, tool_log ++ new_entries)
 
           other ->
             text = extract_text(content)
             Logger.info("ReasoningNode stop_reason=#{other}")
-            {:ok, text, state}
+            {:ok, text, state, tool_log, iterations_left}
         end
 
       {:error, reason} ->
