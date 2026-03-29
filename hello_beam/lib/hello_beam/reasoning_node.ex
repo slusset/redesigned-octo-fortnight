@@ -330,6 +330,41 @@ defmodule HelloBeam.ReasoningNode do
     end
   end
 
+  # -- Message compaction: prevent context from growing without bound --
+
+  # Keep at most this many message pairs (assistant + user) in the conversation.
+  # The first user message (original prompt) is always preserved.
+  @max_message_pairs 6
+
+  defp maybe_compact_messages(messages) when length(messages) <= @max_message_pairs * 2 + 1 do
+    messages
+  end
+
+  defp maybe_compact_messages(messages) do
+    # Keep the original prompt (first msg) and the most recent message pairs.
+    # The tricky part: we can't drop an assistant message with tool_use blocks
+    # without also dropping the corresponding tool_result user message, and
+    # the API requires alternating user/assistant. So we keep a safe tail.
+    first = List.first(messages)
+    keep_count = @max_message_pairs * 2
+    recent = Enum.take(messages, -keep_count)
+    dropped = length(messages) - keep_count - 1
+
+    # Ensure the recent block starts with an assistant message (not user)
+    # to maintain valid alternation after we prepend the original user msg
+    recent =
+      case recent do
+        [%{role: "user"} | _] ->
+          # Drop the leading user message to fix alternation
+          Enum.drop(recent, 1)
+        _ ->
+          recent
+      end
+
+    Logger.info("ReasoningNode compacted #{dropped} messages from conversation history")
+    [first | recent]
+  end
+
   # -- Agentic loop: reason → tool call → feed result → repeat --
 
   defp agentic_loop(system, messages, state, iterations_left, tool_log \\ [])
@@ -339,6 +374,8 @@ defmodule HelloBeam.ReasoningNode do
   end
 
   defp agentic_loop(system, messages, state, iterations_left, tool_log) do
+    messages = maybe_compact_messages(messages)
+
     case call_claude_api(system, messages) do
       {:ok, %{"content" => content, "stop_reason" => stop_reason}} ->
         case stop_reason do
@@ -499,7 +536,10 @@ defmodule HelloBeam.ReasoningNode do
           true ->
             {ref_string, state} = run_test_async(safe_path, state)
             Logger.info("ReasoningNode launched test run #{ref_string} for #{test_file}")
-            {"Test run started. run_id: #{ref_string}", state}
+            {"Test run started. run_id: #{ref_string}. " <>
+             "Tests run asynchronously and take several seconds. " <>
+             "Call check_test_results ONCE — if still running, stop and provide " <>
+             "your response. Do not poll repeatedly.", state}
         end
 
       {:error, :sandbox_escape} ->
@@ -513,7 +553,10 @@ defmodule HelloBeam.ReasoningNode do
         {"Error: No test run found with run_id: #{run_id}", state}
 
       %{status: :running} ->
-        {"Status: running\nTests are still executing.", state}
+        {"Status: running. Tests are still executing. " <>
+         "Do NOT call check_test_results again immediately — continue with other work " <>
+         "or provide your final response. The test results will be available on your next " <>
+         "reasoning call. Repeatedly polling wastes iterations and context.", state}
 
       %{status: status, output: output, test_summary: summary} ->
         summary_text =
